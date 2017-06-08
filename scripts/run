@@ -1,0 +1,19 @@
+#!/bin/bash -e
+
+DATA_DIR="$1"
+
+if [ ! -d "$DATA_DIR" ]
+then
+  echo "You must specify the data directory" >&2
+  exit 1
+fi
+
+shift
+DATA_DIR="$(readlink -f "$DATA_DIR")"
+
+# Run development version
+docker run --rm -ti \
+  -v "$(pwd)/bin:/usr/src/app/bin" \
+  -v "$DATA_DIR:/data" \
+  bms-archive-normalizer \
+  ./bin/bms-archive-normalizer "$@"

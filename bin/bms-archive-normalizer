@@ -1,0 +1,156 @@
+#!/usr/bin/env ruby
+require 'open3'
+require 'pathname'
+
+class BMSArchiveNormalizer
+  def run
+    if ARGV[0] === '-d'
+      puts "Entering REPL..."
+      require 'pry'
+      binding.pry
+      return
+    end
+    input_file = ARGV[0]
+    tmp_input = '/tmp/input'
+    tmp_output = '/tmp/output'
+    extract_file(input_file, tmp_input)
+
+    files = all_files(tmp_input).to_a
+    notecharts = files.select { |f| is_notechart(f) }
+    notechart_parent = get_notechart_parent(notecharts)
+    info "Found #{notecharts.count} note chart(s) in #{notechart_parent.inspect}"
+
+    run_command "mkdir", "-p", tmp_output
+    operations = process_files(files, notechart_parent)
+    perform_operations(operations, tmp_output)
+
+    require 'pry'; binding.pry
+  end
+
+  def process_files(files, notechart_parent)
+    parent_pathname = Pathname.new(notechart_parent)
+    files.map do |filepath|
+      pathname = Pathname.new(filepath)
+      relative = pathname.relative_path_from(parent_pathname)
+      basename = pathname.basename.to_s
+      if relative.split[0].to_s == '..'
+        info "Skipping #{relative.to_s.inspect}"
+        nil
+      elsif basename =~ /\.wav/i
+        info "Convert #{relative.to_s.inspect} to ogg..."
+        [ :convert_audio, filepath, "#{relative.parent + (relative.basename(relative.extname).to_s + ".ogg")}" ]
+      else
+        [ :copy, filepath, "#{relative}" ]
+      end
+    end
+  end
+
+  def perform_operations(operations, target_dir)
+    operations.group_by { |(type, *_)| type }.sort.each do |type, items|
+      info "Going to perform operation '#{type}' on #{items.count} file(s)"
+    end
+    target_pathname = Pathname.new(target_dir)
+    out_file = lambda do |file|
+      pathname = target_pathname + file
+      pathname.parent.mkpath
+      pathname.to_s
+    end
+    operations.each do |type, *args|
+      case type
+      when :convert_audio
+        run_command "sox", args[0], '-C', '5', out_file[args[1]]
+      when :copy
+        run_command "cp", args[0], out_file[args[1]]
+      end
+    end
+    nil
+  end
+
+  def get_notechart_parent(notecharts)
+    notechart_parents = notecharts.map { |f| File.dirname(f) }.uniq
+    if notechart_parents.empty?
+      bail "No note charts (.bms .bme .bml .pms .bmson) found."
+    elsif notechart_parents.count > 1
+      bail "Note charts found in multiple folder. This is not supported."
+    end
+    notechart_parents.first
+  end
+
+  def is_notechart(name)
+    name =~ /\.(?:bm[sel]|pms|bmson)$/i
+  end
+
+  def extract_file(filename, target_dir)
+    info "Extracting #{filename}"
+    run_command "mkdir", "-p", "#{target_dir}"
+    run_command "7z", "x", "-o#{target_dir}", "#{filename}"
+    clean_file_names(target_dir)
+  end
+
+  def clean_file_names(dir)
+    to_clean = all_files(dir, postorder: true)
+      .map { |f|
+        dirname = File.dirname(f)
+        original = File.basename(f)
+        cleaned = clean_name(original)
+        if original != cleaned
+          [ File.join(dirname, original), File.join(dirname, cleaned) ]
+        end
+      }
+      .compact
+    info "Cleaning encoding of #{to_clean.count} file name(s)"
+    to_clean.each do |(from, to)|
+      trace "Renaming “...” => #{to.inspect}"
+      system "mv", "#{from}", "#{to}"
+    end
+    nil
+  end
+
+  def all_files(dir, postorder: false)
+    Enumerator.new do |y|
+      walk = lambda do |cur|
+        Dir.foreach(cur) do |item|
+          path = File.join(cur, item)
+          if item == "." || item == ".."
+            next
+          elsif File.directory?(path)
+            walk[path]
+            y << path if postorder
+          else
+            y << path
+          end
+        end
+      end
+      walk[dir]
+    end
+  end
+
+  def clean_name(name)
+    codepoints = name.codepoints
+    if codepoints.all? { |c| c < 256 } && codepoints.any? { |c| c >= 128 }
+      codepoints.pack('c*').force_encoding('CP932').encode('UTF-8')
+    else
+      name
+    end
+  end
+
+  def info(text)
+    puts "[INFO] #{text}"
+  end
+
+  def trace(text)
+  end
+
+  def bail(text)
+    raise text
+  end
+
+  def run_command(*args)
+    puts "[RUN] #{args.inspect}"
+    raise "Command failed." unless system(*args)
+  end
+end
+
+if __FILE__ == $0
+  BMSArchiveNormalizer.new.run
+end
